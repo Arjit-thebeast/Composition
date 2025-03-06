@@ -1,0 +1,150 @@
+#!/usr/bin/env node
+/**
+ * index.ts
+ *
+ * Run MCP stdio servers over SSE
+ *
+ * Usage:
+ *   # SSE -> stdio
+ *   npx composio transport --sse https://mcp-server.example.com
+ */
+
+/* eslint-disable no-console */
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { Command } from "commander";
+import { z } from "zod";
+// Use dynamic import for SSEClientTransport to avoid ESM issues
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import {
+  JSONRPCMessage,
+  JSONRPCRequest,
+} from "@modelcontextprotocol/sdk/types.js";
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+const log = (...args: any[]): void => console.log("[mcp-transport]", ...args);
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+const logStderr = (...args: any[]): void =>
+  console.error("[mcp-transport]", ...args);
+
+// If needed, adjust this logic to fetch version from package.json or a default
+function getVersion(): string {
+  return "1.0.0";
+}
+
+async function sseToStdio(sseUrl: string): Promise<void> {
+  logStderr("Starting...");
+  logStderr("MCP Transport utility");
+  logStderr(`  - sse: ${sseUrl}`);
+  logStderr("Connecting to SSE...");
+
+  // @fix: this does not work in dev CLI environment because of esm module.
+  const { SSEClientTransport } = await import(
+    "@modelcontextprotocol/sdk/client/sse.js"
+  );
+  const sseTransport = new SSEClientTransport(new URL(sseUrl));
+  const sseClient = new Client(
+    { name: "mcp-transport", version: getVersion() },
+    { capabilities: {} }
+  );
+
+  sseTransport.onerror = (err: Error) => {
+    logStderr("SSE error:", err);
+  };
+  sseTransport.onclose = () => {
+    logStderr("SSE connection closed");
+    process.exit(1);
+  };
+
+  await sseClient.connect(sseTransport);
+  logStderr("SSE connected");
+
+  const stdioServer = new Server(
+    sseClient.getServerVersion() ?? {
+      name: "mcp-transport",
+      version: getVersion(),
+    },
+    { capabilities: sseClient.getServerCapabilities() }
+  );
+  const stdioTransport = new StdioServerTransport();
+  await stdioServer.connect(stdioTransport);
+
+  const wrapResponse = (req: JSONRPCRequest, payload: object) => ({
+    jsonrpc: req.jsonrpc || "2.0",
+    id: req.id,
+    ...payload,
+  });
+
+  stdioServer.transport!.onmessage = async (message: JSONRPCMessage) => {
+    if ("method" in message && "id" in message) {
+      logStderr("Stdio → SSE:", message);
+      const req = message as JSONRPCRequest;
+      let result;
+      try {
+        result = await sseClient.request(req, z.any());
+      } catch (err) {
+        logStderr("Request error:", err);
+        const errorCode =
+          err && typeof err === "object" && "code" in err
+            ? (err as any).code
+            : -32000;
+        let errorMsg =
+          err && typeof err === "object" && "message" in err
+            ? (err as any).message
+            : "Internal error";
+        const prefix = `MCP error ${errorCode}:`;
+        if (errorMsg.startsWith(prefix)) {
+          errorMsg = errorMsg.slice(prefix.length).trim();
+        }
+        const errorResp = wrapResponse(req, {
+          error: {
+            code: errorCode,
+            message: errorMsg,
+          },
+        });
+        process.stdout.write(JSON.stringify(errorResp) + "\n");
+        return;
+      }
+      const response = wrapResponse(
+        req,
+        result.hasOwnProperty("error")
+          ? { error: { ...result.error } }
+          : { result: { ...result } }
+      );
+      logStderr("Response:", response);
+      process.stdout.write(JSON.stringify(response) + "\n");
+    } else {
+      logStderr("SSE → Stdio:", message);
+      process.stdout.write(JSON.stringify(message) + "\n");
+    }
+  };
+
+  logStderr("Stdio server listening");
+}
+
+export default class SSETransportCommand {
+  private program: Command;
+
+  constructor(program: Command) {
+    this.program = program;
+
+    // Add the transport command
+    this.program
+      .command("transport")
+      .description("Run MCP stdio servers over SSE or vice versa")
+      .option("--sse <url>", "SSE URL to connect to and expose as stdio")
+      .action((options) => {
+        if (options.sse) {
+          this.handleSseToStdio(options.sse);
+        } else {
+          console.error("Error: You must specify --sse option");
+          process.exit(1);
+        }
+      });
+  }
+
+  private async handleSseToStdio(sseUrl: string): Promise<void> {
+    await sseToStdio(sseUrl);
+  }
+}

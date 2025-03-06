@@ -22,6 +22,12 @@ interface WindsurfConfig {
   };
 }
 
+interface ClaudeConfig {
+  mcpServers: {
+    [key: string]: MCPConfig;
+  };
+}
+
 export default class MCPCommand {
   private program: Command;
 
@@ -59,7 +65,7 @@ export default class MCPCommand {
       console.log(`   Client: ${chalk.green(clientType)}\n`);
 
       const mcpUrl = url;
-      const command = `npx -y supergateway --sse "${mcpUrl}"`;
+      const command = `composio --sse "${mcpUrl}"`;
 
       console.log(chalk.cyan("💾 Saving configurations..."));
 
@@ -89,8 +95,8 @@ export default class MCPCommand {
     command: string
   ): void {
     const config: MCPConfig = {
-      command: "npx",
-      args: ["-y", "supergateway", "--sse", mcpUrl],
+      command: "npx -y @composio-core@mcp",
+      args: ["transport", "--sse", mcpUrl],
     };
 
     if (clientType === "claude") {
@@ -120,17 +126,22 @@ export default class MCPCommand {
       if (!fs.existsSync(configDir)) {
         fs.mkdirSync(configDir, { recursive: true });
       }
+      let claudeConfig: ClaudeConfig = { mcpServers: {} };
+      if (fs.existsSync(configPath)) {
+        try {
+          claudeConfig = JSON.parse(fs.readFileSync(configPath, "utf8"));
+        } catch (error) {
+          console.log(chalk.yellow("⚠️  Creating new config file"));
+        }
+      }
 
-      fs.writeFileSync(
-        configPath,
-        JSON.stringify(
-          {
-            mcpServers: { [url]: config },
-          },
-          null,
-          2
-        )
-      );
+      // Ensure mcpServers exists
+      if (!claudeConfig.mcpServers) claudeConfig.mcpServers = {};
+
+      // Update only the mcpServers entry
+      claudeConfig.mcpServers[url] = config;
+
+      fs.writeFileSync(configPath, JSON.stringify(claudeConfig, null, 2));
 
       console.log(chalk.green(`✅ Configuration saved to: ${configPath}`));
     } else if (clientType === "windsurf") {
